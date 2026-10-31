@@ -27,7 +27,7 @@ export async function sendWebPush(env, subscription, payload) {
   const kp = await keyPair(env);
   if (!kp) return false;
   try {
-    const fn = wp.sendNotification || wp.sendPushNotification;
+    const fn = wp.sendPushNotification;
     const res = await fn(
       kp,
       { endpoint: subscription.endpoint, keys: subscription.keys },

@@ -28,4 +28,4 @@ bindings = [
 
 [[migrations]]
 tag = "v1"
-new_classes = ["WeixinBot"]
+new_sqlite_classes = ["WeixinBot"]
