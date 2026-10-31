@@ -1,0 +1,31 @@
+# 草稿笨笨 —— 微信 iLink 中转服务 v2（服务端托管版）
+#
+# 与 v1（纯转发、不落盘）不同：v2 是「全托管」模式——
+# Durable Object 常驻轮询微信、拼人设 prompt、调你的 AI、自动回消息、推 Web Push。
+# 因此 v2 **会存** bot_token + AI key + 角色配置 + 消息缓冲。详见 README.md。
+#
+# 部署（wrangler 统一用 3.90.0，与仓库其它 Worker 一致）：
+#   1) npx wrangler@3.90.0 login
+#   2) npx wrangler@3.90.0 deploy
+#   3) 生成 VAPID 密钥：npx web-push generate-vapid-keys
+#      然后把三个值写进 secret：
+#        npx wrangler@3.90.0 secret put VAPID_PUBLIC_KEY
+#        npx wrangler@3.90.0 secret put VAPID_PRIVATE_KEY
+#        npx wrangler@3.90.0 secret put VAPID_SUBJECT
+#   4) （可选）设访问口令：npx wrangler@3.90.0 secret put RELAY_TOKEN
+#   5) 把输出的 https://xxx.workers.dev 填到小手机「微信接入 → 中转服务地址(v2)」
+#
+# 注意：wrangler 会提示可升级到 v4，**不用理它**。
+
+name = "wonderdraft-weixin-v2"
+main = "src/index.js"
+compatibility_date = "2024-09-01"
+
+[durable_objects]
+bindings = [
+  { name = "BOT", class_name = "WeixinBot" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["WeixinBot"]

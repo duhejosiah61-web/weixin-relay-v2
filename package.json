@@ -1,0 +1,10 @@
+{
+  "name": "wonderdraft-weixin-v2",
+  "version": "1.0.0",
+  "private": true,
+  "description": "草稿笨笨 微信 iLink 中转 v2 —— 服务端全托管（轮询+AI回消息+Web Push）",
+  "type": "module",
+  "dependencies": {
+    "web-push-browser": "^1.4.1"
+  }
+}
