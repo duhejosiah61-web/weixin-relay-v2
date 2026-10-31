@@ -98,6 +98,11 @@ export default {
         return json(await r.json(), r.status);
       }
 
+      if (sub === '/notes') {
+        const r = await stub.fetch('https://do/notes');
+        return json(await r.json(), r.status);
+      }
+
       if (sub === '/push/subscribe' && request.method === 'POST') {
         const r = await stub.fetch('https://do/push/subscribe', {
           method: 'POST',

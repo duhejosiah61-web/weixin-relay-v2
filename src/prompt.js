@@ -31,6 +31,13 @@ export function buildWeixinSystem(char, recentBlock = '') {
     '一般 1~3 行就够，最多 4 行。绝对不要把想说的全塞进一个大段落里。',
     '也不要自己加编号（不要写 1. 2. 3.），不要给每行加引号。',
     '如果用户发来的是图片，你会直接看到图片内容，正常针对画面说话就行，不用问「你发了什么」。',
+    '',
+    '【关于小纸条与定时提醒】',
+    '当对方让你到点提醒她做某件事（例如：几点提醒我、几点前叫我、提醒我吃药、开会等）、或者你们约定几点干什么、或者你想主动为她记下一份备忘时，',
+    '请在正常回复之外，单独起一行写：',
+    '[小纸条: 时间 | 待办内容]',
+    '例如：[小纸条: 15:00 | 下午部门例会，带笔记本] 或 [小纸条: 20:30 | 记得准时吃药] 或 [小纸条: 30分钟后 | 出门拿快递]',
+    '这一行会被系统自动转为她「陪伴」App 待办清单里的实体小纸条，并且系统会在设定的时间到达时，自动由你向她发消息主动提醒！用户微信窗口不会看到方括号指令本身。',
   ].join('\n');
 
   return `${personaHeader}${worldbook}${recent}${sceneBlock}`;
@@ -61,15 +68,11 @@ export function timeBlock() {
 }
 
 /**
- * 模型可以在回复里穿插三种「非文字」动作，只有**独立成行**才认 ——
- * 否则正文里正常写个方括号就会被误伤。
- *
+ * 模型可以在回复里穿插动作指令：
  *   [发送了表情: 名字]   发表情包
  *   [[voice: 要说的话]]  发语音条
  *   [[pic: 画图描述]]    现场生一张图
- *
- * ⚠️ Worker 端目前只发得出文字，非文字段会被发送环节跳过（不丢正文字的内容）。
- *    解析规则仍然与前端保持完全一致，等到 CDN 上传搬过来就能直接用。
+ *   [小纸条: 时间 | 内容] 小纸条待办
  */
 const EMOJI_LINE_SRC = '^[ \\t]*\\[\\s*发送了表情\\s*[:：]\\s*([^\\]\\n]{1,60})\\s*\\][ \\t]*$';
 const VOICE_LINE_SRC = '^[ \\t]*\\[\\[\\s*voice\\s*[:：]\\s*([^\\]\\n]{1,500})\\s*\\]\\][ \\t]*$';
@@ -79,7 +82,11 @@ const INLINE_MARKS = [
   /\[\s*发送了表情\s*[:：][^\]\n]{0,60}\]/g,
   /\[\[\s*voice\s*[:：][^\]\n]{0,500}\]\]/gi,
   /\[\[\s*pic\s*[:：][^\]\n]{0,200}\]\]/gi,
+  /\[(?:小纸条|提醒|待办|备忘)\s*[:：][^\]\n]*\]/gi,
 ];
+
+const NOTE_DIRECTIVE_REGEX = /\[(?:小纸条|提醒|待办|备忘)\s*[:：]\s*(?:([^|｜\n\]]+)\s*[|｜]\s*)?([^\]]+)\]/i;
+const ALL_NOTE_DIRECTIVES_REGEX = /\[(?:小纸条|提醒|待办|备忘)\s*[:：][^\]]*\]/gi;
 
 /** 单条消息的软长度上限，超过就再拆一次。真人微信一条很少超过这么多字 */
 const MAX_LINE_CHARS = 60;
@@ -98,7 +105,6 @@ function collectLineMatches(raw, sourceRe, kind) {
   return out;
 }
 
-/** 清洗 AI 输出成适合发微信的纯文本 */
 export function cleanWeixinReply(raw) {
   let s = String(raw || '');
   s = s.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '');
@@ -113,10 +119,142 @@ export function cleanWeixinReply(raw) {
   return s.trim();
 }
 
-/**
- * 把模型的原始输出解析成有序节目单。
- * @returns {Array<{kind: string, value: string}>}
- */
+export function parseNoteDirective(rawText) {
+  if (!rawText || typeof rawText !== 'string') {
+    return { hasNote: false, timeRaw: '', text: '', cleanText: '' };
+  }
+  const match = rawText.match(NOTE_DIRECTIVE_REGEX);
+  const cleanText = rawText.replace(ALL_NOTE_DIRECTIVES_REGEX, '').trim();
+  if (!match) {
+    return { hasNote: false, timeRaw: '', text: '', cleanText };
+  }
+  const part1 = (match[1] || '').trim();
+  const part2 = (match[2] || '').trim();
+  let timeRaw = '';
+  let noteText = '';
+  if (part1 && part2) {
+    timeRaw = part1;
+    noteText = part2;
+  } else if (part2) {
+    const leadingTimeMatch = part2.match(/^((?:\d{1,2}:\d{2})|(?:(?:今天|明天|后天)?\s*(?:上午|下午|晚上)?\s*\d{1,2}(?:[:点]\d{0,2})?(?:分)?)|(?:\d+\s*(?:分钟|小时)后))\s+(.+)$/);
+    if (leadingTimeMatch) {
+      timeRaw = leadingTimeMatch[1].trim();
+      noteText = leadingTimeMatch[2].trim();
+    } else {
+      noteText = part2;
+    }
+  }
+  return { hasNote: !!noteText, timeRaw, text: noteText, cleanText };
+}
+
+export function resolveReminderTime(timeStr, baseDate = new Date()) {
+  const now = new Date(baseDate);
+  if (!timeStr || typeof timeStr !== 'string' || !timeStr.trim()) {
+    return { targetDate: now, timestamp: now.getTime(), formattedTime: '', isUpcoming: false };
+  }
+  const str = timeStr.trim().toLowerCase();
+  let target = new Date(now.getTime());
+  let formattedTime = '';
+
+  const halfHourMatch = str.match(/^(?:半小时|半个?小时)后$/);
+  if (halfHourMatch) {
+    target = new Date(now.getTime() + 30 * 60 * 1000);
+    const hh = String(target.getHours()).padStart(2, '0');
+    const mm = String(target.getMinutes()).padStart(2, '0');
+    formattedTime = `30分钟后 (${hh}:${mm})`;
+    return { targetDate: target, timestamp: target.getTime(), formattedTime, isUpcoming: true };
+  }
+
+  const minMatch = str.match(/^(\d+)\s*(?:分钟|分)后$/);
+  if (minMatch) {
+    const mins = parseInt(minMatch[1], 10);
+    target = new Date(now.getTime() + mins * 60 * 1000);
+    const hh = String(target.getHours()).padStart(2, '0');
+    const mm = String(target.getMinutes()).padStart(2, '0');
+    formattedTime = `${mins}分钟后 (${hh}:${mm})`;
+    return { targetDate: target, timestamp: target.getTime(), formattedTime, isUpcoming: true };
+  }
+
+  const hourMatch = str.match(/^(\d+(?:\.\d+)?)\s*(?:个?半?)?小时后$/);
+  if (hourMatch) {
+    const hours = parseFloat(hourMatch[1]);
+    const extraHalf = str.includes('半') && !str.includes('.5') ? 0.5 : 0;
+    const totalHours = hours + extraHalf;
+    target = new Date(now.getTime() + totalHours * 3600 * 1000);
+    const hh = String(target.getHours()).padStart(2, '0');
+    const mm = String(target.getMinutes()).padStart(2, '0');
+    formattedTime = `${totalHours}小时后 (${hh}:${mm})`;
+    return { targetDate: target, timestamp: target.getTime(), formattedTime, isUpcoming: true };
+  }
+
+  let dayOffset = 0;
+  let dayLabel = '今日';
+  if (str.includes('明天') || str.includes('次日')) {
+    dayOffset = 1;
+    dayLabel = '明天';
+  } else if (str.includes('后天')) {
+    dayOffset = 2;
+    dayLabel = '后天';
+  }
+  target.setDate(target.getDate() + dayOffset);
+
+  let hour = -1;
+  let minute = 0;
+  const colonMatch = str.match(/(\d{1,2})[:：](\d{1,2})/);
+  if (colonMatch) {
+    hour = parseInt(colonMatch[1], 10);
+    minute = parseInt(colonMatch[2], 10);
+  } else {
+    const pointMatch = str.match(/(\d{1,2})\s*点(?:半|(\d{1,2})分?)?/);
+    if (pointMatch) {
+      hour = parseInt(pointMatch[1], 10);
+      if (str.includes('半')) {
+        minute = 30;
+      } else if (pointMatch[2]) {
+        minute = parseInt(pointMatch[2], 10);
+      } else {
+        minute = 0;
+      }
+    }
+  }
+
+  if (hour >= 0) {
+    if ((str.includes('下午') || str.includes('傍晚') || str.includes('晚上') || str.includes('夜里') || str.includes('今晚')) && hour < 12) {
+      hour += 12;
+    } else if ((str.includes('上午') || str.includes('早上') || str.includes('早晨')) && hour === 12) {
+      hour = 0;
+    }
+    target.setHours(hour, minute, 0, 0);
+    if (dayOffset === 0 && target.getTime() <= now.getTime()) {
+      target.setDate(target.getDate() + 1);
+      dayLabel = '明天';
+    }
+    const hh = String(target.getHours()).padStart(2, '0');
+    const mm = String(target.getMinutes()).padStart(2, '0');
+    formattedTime = `${dayLabel} ${hh}:${mm}`;
+    return {
+      targetDate: target,
+      timestamp: target.getTime(),
+      formattedTime,
+      isUpcoming: target.getTime() > now.getTime()
+    };
+  }
+
+  const parsed = new Date(timeStr);
+  if (!isNaN(parsed.getTime())) {
+    const hh = String(parsed.getHours()).padStart(2, '0');
+    const mm = String(parsed.getMinutes()).padStart(2, '0');
+    return {
+      targetDate: parsed,
+      timestamp: parsed.getTime(),
+      formattedTime: `${hh}:${mm}`,
+      isUpcoming: parsed.getTime() > now.getTime()
+    };
+  }
+
+  return { targetDate: now, timestamp: now.getTime(), formattedTime: timeStr, isUpcoming: false };
+}
+
 export function parseReplySegments(raw) {
   const s = String(raw || '');
   const marks = [
@@ -148,25 +286,20 @@ function pushTextSegments(segs, chunk) {
 
 function splitLongLine(line) {
   if (line.length <= MAX_LINE_CHARS) return [line];
-
-  const byPunct = [];
-  let buf = '';
-  for (const ch of line) {
-    buf += ch;
-    if (/[。！？!?…；;]/.test(ch) && buf.length >= MAX_LINE_CHARS * 0.6) {
-      byPunct.push(buf.trim());
-      buf = '';
-    }
-  }
-  if (buf.trim()) byPunct.push(buf.trim());
-
   const out = [];
-  for (const piece of byPunct) {
-    if (piece.length <= MAX_LINE_CHARS * 1.5) { out.push(piece); continue; }
-    for (let i = 0; i < piece.length; i += MAX_LINE_CHARS) {
-      out.push(piece.slice(i, i + MAX_LINE_CHARS));
+  let rest = line;
+  const breakChars = ['，', '。', '！', '？', '；', '、', ',', '!', '?', ';', ' '];
+  while (rest.length > MAX_LINE_CHARS) {
+    let cut = -1;
+    for (let i = MAX_LINE_CHARS; i >= 15; i--) {
+      if (breakChars.includes(rest[i])) { cut = i + 1; break; }
     }
+    if (cut <= 0) cut = MAX_LINE_CHARS;
+    const piece = rest.slice(0, cut).trim();
+    if (piece) out.push(piece);
+    rest = rest.slice(cut).trim();
   }
+  if (rest) out.push(rest);
   return out.length ? out : [line];
 }
 
@@ -180,7 +313,6 @@ function capSegments(segs) {
   return head;
 }
 
-/** 把多模态内容拼成 callAI 能吃的格式（有图给数组，没图给字符串） */
 export function buildUserContent(userText, images) {
   if (!images || !images.length) return userText;
   const parts = [];
@@ -190,7 +322,6 @@ export function buildUserContent(userText, images) {
   return parts;
 }
 
-/** 把多条消息拼成一段 user 输入（连发合并） */
 export function joinIncoming(parts) {
   return parts.length === 1 ? parts[0] : parts.join('\n');
 }

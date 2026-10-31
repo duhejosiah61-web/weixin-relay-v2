@@ -12,6 +12,7 @@ import {
 } from './ilink.js';
 import {
   buildWeixinSystem, buildUserContent, joinIncoming, parseReplySegments,
+  parseNoteDirective, resolveReminderTime,
 } from './prompt.js';
 import { callAI } from './callAI.js';
 import { sendWebPush } from './push.js';
@@ -58,6 +59,7 @@ export class WeixinBot {
       running: false, botToken: '', botId: '',
       aiProfile: null, char: null, recentBlock: '',
       cursor: '', history: [], seen: {}, lastContext: null,
+      reminders: [], charNotes: [],
       pushSubs: [], runtime: { lastAt: 0, error: '', replied: 0 },
     };
   }
@@ -99,6 +101,42 @@ export class WeixinBot {
       if (s.running) await this.reschedule();
       return;
     }
+
+    // 检查定时到期的小纸条提醒，主动向微信发送对白提醒
+    const now = Date.now();
+    if (s.reminders && s.reminders.length) {
+      let changed = false;
+      for (const rem of s.reminders) {
+        if (!rem.notified && rem.targetTime && rem.targetTime <= now) {
+          rem.notified = true;
+          changed = true;
+          try {
+            if (s.botToken && rem.toUserId) {
+              const remindMsg = `${rem.charName || 'TA'}：之前小纸条上记下的【${rem.text}】到时间啦，提醒你一下哦。`;
+              await sendTextMessage({
+                botToken: s.botToken,
+                toUserId: rem.toUserId,
+                contextToken: rem.contextToken,
+                text: remindMsg,
+              });
+              s.runtime = { ...(s.runtime || {}), replied: (s.runtime?.replied || 0) + 1 };
+            }
+          } catch (e) {
+            console.warn('[weixinBot] 提醒消息发送失败', e);
+          }
+          await this.notify(s, {
+            title: `${rem.charName || 'TA'} 的小纸条提醒`,
+            body: `叮嘱：${rem.text}`,
+            tag: 'char-reminder',
+          });
+          await this.broadcast({ type: 'reminder-fired', reminder: rem });
+        }
+      }
+      if (changed) {
+        await this.save(s);
+      }
+    }
+
     try {
       await this.pollAndReply(s);
     } catch (e) {
@@ -240,6 +278,39 @@ export class WeixinBot {
       }
     }
 
+    // 解析小纸条与定时提醒指令
+    const noteMatch = parseNoteDirective(raw);
+    if (noteMatch.hasNote) {
+      raw = noteMatch.cleanText;
+      const resolved = resolveReminderTime(noteMatch.timeRaw);
+      st = await this.load();
+      st.reminders = st.reminders || [];
+      st.charNotes = st.charNotes || [];
+
+      const newRem = {
+        id: `remind-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        targetTime: resolved.timestamp,
+        timeStr: resolved.formattedTime,
+        text: noteMatch.text,
+        charName: st.char?.name || '伴侣',
+        toUserId: lastMsg.fromUserId,
+        contextToken: lastMsg.contextToken,
+        createdAt: Date.now(),
+        notified: false
+      };
+      st.reminders.push(newRem);
+      st.charNotes.push({
+        id: Date.now() + Math.random(),
+        text: noteMatch.text,
+        timeStr: resolved.formattedTime,
+        fromCharName: st.char?.name || '伴侣',
+        createdAt: Date.now(),
+        synced: false
+      });
+      await this.save(st);
+      await this.broadcast({ type: 'note-added', note: newRem });
+    }
+
     const segments = parseReplySegments(raw).filter((s) => s.kind === 'text');
     if (!segments.length) return await this.fail(st, 'AI 返回的回复为空');
 
@@ -343,8 +414,11 @@ export class WeixinBot {
   }
 
   /** 前端把本地聊天记录同步上来（以本地为准），顺便刷新「最近发生的事」 */
-  async syncFromClient({ history, recentBlock, char }) {
+  async syncFromClient({ history, recentBlock, char, ackNotes }) {
     const s = await this.load();
+    if (Array.isArray(ackNotes) && ackNotes.length) {
+      s.charNotes = (s.charNotes || []).filter(n => !ackNotes.includes(n.id));
+    }
     if (Array.isArray(history) && history.length) {
       s.history = history.slice(-HISTORY_MAX).map((m) => ({
         role: m.role === 'user' || m.isMe ? 'user' : 'assistant',
@@ -354,7 +428,7 @@ export class WeixinBot {
     if (typeof recentBlock === 'string') s.recentBlock = recentBlock;
     if (char && typeof char === 'object') s.char = { ...(s.char || {}), ...char };
     await this.save(s);
-    return { ok: true, historyLen: s.history.length };
+    return { ok: true, historyLen: s.history.length, notes: s.charNotes || [] };
   }
 
   async getState() {
@@ -365,8 +439,14 @@ export class WeixinBot {
       botId: s.botId,
       cursor: s.cursor,
       history: s.history || [],
+      notes: s.charNotes || [],
+      reminders: s.reminders || [],
       runtime: s.runtime || {},
       hasChar: !!s.char,
+      hasAI: !!s.aiProfile,
+      pushCount: (s.pushSubs || []).length,
+    };
+  }
       hasAI: !!s.aiProfile,
       pushSubs: (s.pushSubs || []).length,
     };
@@ -432,6 +512,10 @@ export class WeixinBot {
     if (path === '/start' && request.method === 'POST') return json(await this.start());
     if (path === '/stop' && request.method === 'POST') return json(await this.stop());
     if (path === '/state') return json(await this.getState());
+    if (path === '/notes') {
+      const s = await this.load();
+      return json({ ok: true, notes: s.charNotes || [], reminders: s.reminders || [] });
+    }
 
     if (path === '/push/subscribe' && request.method === 'POST') {
       const body = await request.json();
