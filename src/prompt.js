@@ -43,17 +43,19 @@ export function buildWeixinSystem(char, recentBlock = '') {
   return `${personaHeader}${worldbook}${recent}${sceneBlock}`;
 }
 
-// 当前时间提示块（复刻自前端）
+// 当前时间提示块（转为东八区北京时间，杜绝 Cloudflare UTC 零时区导致晚上变中午）
 export function timeBlock() {
-  const now = new Date();
+  const utcNow = new Date();
+  // 加上 8 小时转为北京时间
+  const bjTime = new Date(utcNow.getTime() + 8 * 3600 * 1000);
   const days = ['日', '一', '二', '三', '四', '五', '六'];
-  const y = now.getFullYear();
-  const mo = now.getMonth() + 1;
-  const d = now.getDate();
-  const hh = String(now.getHours()).padStart(2, '0');
-  const mm = String(now.getMinutes()).padStart(2, '0');
-  const h = now.getHours();
-  const wd = days[now.getDay()];
+  const y = bjTime.getUTCFullYear();
+  const mo = bjTime.getUTCMonth() + 1;
+  const d = bjTime.getUTCDate();
+  const hh = String(bjTime.getUTCHours()).padStart(2, '0');
+  const mm = String(bjTime.getUTCMinutes()).padStart(2, '0');
+  const h = bjTime.getUTCHours();
+  const wd = days[bjTime.getUTCDay()];
 
   let mood = '';
   if (h >= 0 && h < 5) mood = '（深夜，人一般在睡觉或熬夜。如果对方这时候找你，可以有一点点在意或嗔怪的味道，但别刻意。）';

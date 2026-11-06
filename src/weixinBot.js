@@ -335,13 +335,14 @@ export class WeixinBot {
     const reply = sentTexts.join('\n');
 
     // 更新服务端上下文：把对方的话和回复都写进 history
+    const nowTs = Date.now();
     st = await this.load();
     st.history = [
       ...(st.history || []),
-      { role: 'user', content: userText },
-      { role: 'assistant', content: reply },
+      { role: 'user', content: userText, ts: nowTs - 2000, id: `wx_${nowTs - 2000}` },
+      { role: 'assistant', content: reply, ts: nowTs, id: `wx_${nowTs}` },
     ].slice(-HISTORY_MAX);
-    st.runtime = { lastAt: Date.now(), error: '', replied: (st.runtime?.replied || 0) + 1 };
+    st.runtime = { lastAt: nowTs, error: '', replied: (st.runtime?.replied || 0) + 1 };
     await this.save(st);
 
     await this.broadcast({ type: 'replied', user: userText, reply, segments: sentTexts.length });
@@ -445,10 +446,6 @@ export class WeixinBot {
       hasChar: !!s.char,
       hasAI: !!s.aiProfile,
       pushCount: (s.pushSubs || []).length,
-    };
-  }
-      hasAI: !!s.aiProfile,
-      pushSubs: (s.pushSubs || []).length,
     };
   }
 
