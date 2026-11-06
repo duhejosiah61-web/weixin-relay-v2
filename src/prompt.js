@@ -26,9 +26,10 @@ export function buildWeixinSystem(char, recentBlock = '') {
     '',
     '【最重要：一行就是一条消息】',
     '你这次回复可以发好几条。**你每写一行，微信就会单独发出去一条消息**，',
-    '对方看到的就是一个个分开的气泡，跟你平时打字聊天一模一样。',
-    '所以请务必拆开写：一句话一行、问句单独一行、想补充的再另起一行。',
-    '一般 1~3 行就够，最多 4 行。绝对不要把想说的全塞进一个大段落里。',
+    '对方看到的就是一个个分开的小气泡，跟你平时打字聊天一模一样。',
+    '为了让对方在手机和平板分屏小屏下看得很舒服，每行请保持在 8~18 个字以内的自然短句，严禁写超长单句。',
+    '请务必拆开写：一句话一行、问句单独一行、想补充的再另起一行。',
+    '一般 1~4 行，最多 6 行。绝对不要把想说的全塞进一个大段落里。',
     '也不要自己加编号（不要写 1. 2. 3.），不要给每行加引号。',
     '如果用户发来的是图片，你会直接看到图片内容，正常针对画面说话就行，不用问「你发了什么」。',
     '',
@@ -90,10 +91,10 @@ const INLINE_MARKS = [
 const NOTE_DIRECTIVE_REGEX = /\[(?:小纸条|提醒|待办|备忘)\s*[:：]\s*(?:([^|｜\n\]]+)\s*[|｜]\s*)?([^\]]+)\]/i;
 const ALL_NOTE_DIRECTIVES_REGEX = /\[(?:小纸条|提醒|待办|备忘)\s*[:：][^\]]*\]/gi;
 
-/** 单条消息的软长度上限，超过就再拆一次。真人微信一条很少超过这么多字 */
-const MAX_LINE_CHARS = 60;
+/** 单条消息的软长度上限：适配平板分屏/小窗，超过 18 字自动沿标点拆成小气泡，杜绝微信右侧切字 */
+const MAX_LINE_CHARS = 18;
 /** 一次回复最多发几条，防止模型失控在微信里刷屏 */
-const MAX_REPLY_SEGMENTS = 5;
+const MAX_REPLY_SEGMENTS = 8;
 
 function collectLineMatches(raw, sourceRe, kind) {
   const s = String(raw || '');
@@ -293,7 +294,8 @@ function splitLongLine(line) {
   const breakChars = ['，', '。', '！', '？', '；', '、', ',', '!', '?', ';', ' '];
   while (rest.length > MAX_LINE_CHARS) {
     let cut = -1;
-    for (let i = MAX_LINE_CHARS; i >= 15; i--) {
+    // 优先在 8 到 MAX_LINE_CHARS 字之间寻找标点符号断句
+    for (let i = MAX_LINE_CHARS; i >= 8; i--) {
       if (breakChars.includes(rest[i])) { cut = i + 1; break; }
     }
     if (cut <= 0) cut = MAX_LINE_CHARS;
