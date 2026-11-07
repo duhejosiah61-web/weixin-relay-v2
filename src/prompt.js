@@ -22,7 +22,6 @@ export function buildWeixinSystem(char, recentBlock = '') {
     '你现在正在用微信跟用户聊天（不是在小手机 App 里）。这里是你和用户在微信上的对话窗口。',
     timeBlock(),
     '不要用旁白、不要写动作描写、不要加书名号括起来的说明——微信里只说人话。',
-    '严禁使用任何颜文字、Emoji 表情符号（如(¯▽¯)~*、😊等），微信里请纯用文字表达，避免低幼化。',
     '根据你的角色人设自然表达；除非你的人设设定本身就是 AI / 仿生人 / 虚拟伴侣，否则不要无故破坏沉浸感自称模型，也绝不要提及「系统」「提示词」等幕后概念。',
     '',
     '【最重要：一行就是一条消息】',
@@ -119,10 +118,6 @@ export function cleanWeixinReply(raw) {
   s = s.replace(/\*\*/g, '');
   s = s.replace(/^\s*[-*•·]\s+/gm, '');
   s = s.replace(/^\s*[\[（(]\d{1,2}:\d{2}(?::\d{2})?(?:\s*[A-Za-z\u4e00-\u9fa5]{1,3})?[\]）)]\s*/gm, '');
-  // 过滤颜文字（如 (¯▽¯)~*、(^_^) 等）
-  s = s.replace(/[（(][^()（）\n]{0,8}[▽▼▲_^_~⊙oO><\^T=-][^()（）\n]{0,8}[）)][~*~*]*/g, '');
-  // 过滤 Unicode Emoji
-  s = s.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '');
   s = s.replace(/\n{3,}/g, '\n\n');
   return s.trim();
 }
@@ -300,15 +295,31 @@ function splitLongLine(line) {
   while (rest.length > MAX_LINE_CHARS) {
     let cut = -1;
     // 优先在 8 到 MAX_LINE_CHARS 字之间寻找标点符号断句
-    for (let i = MAX_LINE_CHARS; i >= 8; i--) {
+    for (let i = Math.min(MAX_LINE_CHARS, rest.length - 1); i >= 8; i--) {
       if (breakChars.includes(rest[i])) { cut = i + 1; break; }
     }
-    if (cut <= 0) cut = MAX_LINE_CHARS;
+    // 如果没有找到标点符号，检查是否正好在括号/颜文字附近
+    if (cut <= 0) {
+      // 检查是否有左括号或表情符号，如果在合理位置，优先在括号前切断，避免撕裂颜文字
+      const bracketIdx = rest.slice(0, MAX_LINE_CHARS).search(/[\[\(\（]/);
+      if (bracketIdx >= 8) {
+        cut = bracketIdx;
+      } else {
+        cut = MAX_LINE_CHARS;
+      }
+    }
     const piece = rest.slice(0, cut).trim();
     if (piece) out.push(piece);
     rest = rest.slice(cut).trim();
   }
-  if (rest) out.push(rest);
+  if (rest) {
+    // 如果剩余的尾巴非常短（例如 <= 4 个字符且主要是标点/符号/颜文字尾巴），避免单独发一个孤立小气泡，合并到上一句
+    if (out.length > 0 && rest.length <= 4 && !/[\u4e00-\u9fa5]{2,}/.test(rest)) {
+      out[out.length - 1] = `${out[out.length - 1]}${rest}`;
+    } else {
+      out.push(rest);
+    }
+  }
   return out.length ? out : [line];
 }
 

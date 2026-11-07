@@ -19,7 +19,8 @@ import { sendWebPush } from './push.js';
 
 const POLL_MS = 5000;        // 轮询间隔（alarm 自调度）
 const COLLECT_MS = 1500;     // 连发合并窗口：收到消息后再等一小会儿
-const HISTORY_MAX = 50;      // 保留最近多少条上下文（扩容以保证深度连续剧情记忆）
+const STORAGE_HISTORY_MAX = 1000; // 服务端存储历史上限（大幅扩容至千条，基本等同于无上限，保证完整聊天记录永不丢弃并能回拉到客户端）
+const CONTEXT_BUDGET_CHARS = 40000; // 发送给 LLM 的上下文预算上限（字符数保护，防止超长对话导致模型提供商报错 400 Context Length Exceeded）
 const SEEN_TTL_MS = 10 * 60 * 1000;
 const SEEN_MAX = 300;
 
@@ -248,7 +249,17 @@ export class WeixinBot {
     await this.save(st);
 
     const system = buildWeixinSystem(st.char, st.recentBlock);
-    const history = (st.history || []).slice(-HISTORY_MAX);
+    // 按上下文预算安全构建 history，尽可能保留全部历史，同时避免超出模型上下文上限报错
+    const rawHistory = st.history || [];
+    let totalChars = 0;
+    const history = [];
+    for (let i = rawHistory.length - 1; i >= 0; i--) {
+      const msg = rawHistory[i];
+      const len = String(msg.content || '').length;
+      if (totalChars + len > CONTEXT_BUDGET_CHARS && history.length >= 20) break;
+      totalChars += len;
+      history.unshift({ role: msg.role, content: msg.content });
+    }
     const messages = [{ role: 'system', content: system }, ...history, { role: 'user', content: userContent }];
 
     // 「正在输入」，失败不影响主流程
@@ -341,7 +352,7 @@ export class WeixinBot {
       ...(st.history || []),
       { role: 'user', content: userText, ts: nowTs - 2000, id: `wx_${nowTs - 2000}` },
       { role: 'assistant', content: reply, ts: nowTs, id: `wx_${nowTs}` },
-    ].slice(-HISTORY_MAX);
+    ].slice(-STORAGE_HISTORY_MAX);
     st.runtime = { lastAt: nowTs, error: '', replied: (st.runtime?.replied || 0) + 1 };
     await this.save(st);
 
@@ -421,7 +432,7 @@ export class WeixinBot {
       s.charNotes = (s.charNotes || []).filter(n => !ackNotes.includes(n.id));
     }
     if (Array.isArray(history) && history.length) {
-      s.history = history.slice(-HISTORY_MAX).map((m) => ({
+      s.history = history.slice(-STORAGE_HISTORY_MAX).map((m) => ({
         role: m.role === 'user' || m.isMe ? 'user' : 'assistant',
         content: String(m.content ?? m.text ?? '').slice(0, 2000),
       }));
