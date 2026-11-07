@@ -14,6 +14,7 @@ export function buildWeixinSystem(char, recentBlock = '') {
     : '';
 
   const worldbook = char?.worldbookText ? `\n\n【世界设定】\n${char.worldbookText}\n` : '';
+  const memories = char?.memoriesText ? `\n\n【你们之间的共同回忆（在回忆App沉淀的点点滴滴，深深刻在你的记忆深处）】\n${char.memoriesText}\n` : '';
   const recent = recentBlock ? `\n\n【刚刚发生的事（你自然知道这些）】\n${recentBlock}` : '';
 
   // ⚠️ 这一节必须与前端 weixinBridge.buildWeixinSystem 保持一致，否则会出现
@@ -50,7 +51,7 @@ export function buildWeixinSystem(char, recentBlock = '') {
     '这一行会被系统自动转为她「陪伴」App 待办清单里的实体小纸条，并且系统会在设定的时间到达时，自动由你向她发消息主动提醒！用户微信窗口不会看到方括号指令本身。',
   ].join('\n');
 
-  return `${personaHeader}${aiEntityBlock}${worldbook}${recent}${sceneBlock}`;
+  return `${personaHeader}${aiEntityBlock}${worldbook}${memories}${recent}${sceneBlock}`;
 }
 
 // 当前时间提示块（转为东八区北京时间，杜绝 Cloudflare UTC 零时区导致晚上变中午）
