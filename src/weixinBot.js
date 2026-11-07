@@ -311,10 +311,13 @@ export class WeixinBot {
     const history = [];
     for (let i = rawHistory.length - 1; i >= 0; i--) {
       const msg = rawHistory[i];
-      const len = String(msg.content || '').length;
+      const rawContent = typeof msg.content === 'string'
+        ? msg.content.replace(/[\[【][\s:：\-_~^]*[\]】]/g, '').trim()
+        : msg.content;
+      const len = String(rawContent || '').length;
       if (totalChars + len > CONTEXT_BUDGET_CHARS && history.length >= 20) break;
       totalChars += len;
-      history.unshift({ role: msg.role, content: msg.content });
+      history.unshift({ role: msg.role, content: rawContent });
     }
     const messages = [{ role: 'system', content: system }, ...history, { role: 'user', content: userContent }];
 
@@ -384,15 +387,17 @@ export class WeixinBot {
     // 逐条发出去（一条 = 一个气泡），条间留点打字节奏，跟安卓端口径一致
     const sentTexts = [];
     for (let i = 0; i < segments.length; i++) {
-      if (i > 0) await sleep(replyDelay(segments[i - 1].value));
+      const cleanVal = segments[i].value.replace(/[\[【][\s:：\-_~^]*[\]】]/g, '').trim();
+      if (!cleanVal) continue;
+      if (sentTexts.length > 0) await sleep(replyDelay(sentTexts[sentTexts.length - 1]));
       try {
         await sendTextMessage({
           botToken: st.botToken,
           toUserId: lastMsg.fromUserId,
           contextToken: lastMsg.contextToken,
-          text: segments[i].value,
+          text: cleanVal,
         });
-        sentTexts.push(segments[i].value);
+        sentTexts.push(cleanVal);
       } catch (e) {
         // 一条失败不影响后面的：少一个气泡总比整段回复全丢强
         console.warn('[weixinBot] 第 ' + (i + 1) + ' 条发送失败：', e?.message || e);

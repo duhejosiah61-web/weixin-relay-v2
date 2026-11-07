@@ -293,6 +293,8 @@ export async function fetchFileDetails(fileItem) {
           }
         }
       } catch (e) { /* ignore */ }
+    } else if (ext === 'docx') {
+      textContent = await extractDocxText(unpadded);
     } else if (ext === 'pdf') {
       textContent = extractSimplePdfText(unpadded);
     }
@@ -329,6 +331,114 @@ function extractSimplePdfText(unpadded) {
     }
   } catch (_) {}
   return '';
+}
+
+async function extractDocxText(unpadded) {
+  try {
+    const bytes = unpadded;
+    let compMethod = 8;
+    let compressed = null;
+
+    // 1. 优先从 Zip 尾部 Central Directory (PK\x01\x02) 精确读取，这能避开 data descriptor 导致的压缩尺寸未知问题
+    const enc = new TextEncoder();
+    const docXmlName = enc.encode('word/document.xml');
+    for (let i = 0; i <= bytes.length - 46; i++) {
+      if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x01 && bytes[i + 3] === 0x02) {
+        const fnLen = bytes[i + 28] | (bytes[i + 29] << 8);
+        if (fnLen === docXmlName.length) {
+          let match = true;
+          for (let j = 0; j < fnLen; j++) {
+            if (bytes[i + 46 + j] !== docXmlName[j]) { match = false; break; }
+          }
+          if (match) {
+            compMethod = bytes[i + 10] | (bytes[i + 11] << 8);
+            const compSize = (bytes[i + 20]) | (bytes[i + 21] << 8) | (bytes[i + 22] << 16) | (bytes[i + 23] << 24);
+            const localOffset = (bytes[i + 42]) | (bytes[i + 43] << 8) | (bytes[i + 44] << 16) | (bytes[i + 45] << 24);
+            const localFnLen = bytes[localOffset + 26] | (bytes[localOffset + 27] << 8);
+            const localExtraLen = bytes[localOffset + 28] | (bytes[localOffset + 29] << 8);
+            const dataStart = localOffset + 30 + localFnLen + localExtraLen;
+            compressed = bytes.subarray(dataStart, dataStart + compSize);
+            break;
+          }
+        }
+      }
+    }
+
+    // 2. 如果 Central Directory 没找到，回退到扫描 Local File Header (PK\x03\x04)
+    if (!compressed) {
+      let idx = -1;
+      for (let i = 0; i < bytes.length - docXmlName.length; i++) {
+        let match = true;
+        for (let j = 0; j < docXmlName.length; j++) {
+          if (bytes[i + j] !== docXmlName[j]) { match = false; break; }
+        }
+        if (match) { idx = i; break; }
+      }
+      if (idx >= 0) {
+        let headerStart = -1;
+        for (let i = idx - 1; i >= Math.max(0, idx - 100); i--) {
+          if (bytes[i] === 0x50 && bytes[i+1] === 0x4b && bytes[i+2] === 0x03 && bytes[i+3] === 0x04) {
+            headerStart = i;
+            break;
+          }
+        }
+        if (headerStart >= 0) {
+          compMethod = bytes[headerStart + 8] | (bytes[headerStart + 9] << 8);
+          const compSize = (bytes[headerStart + 18]) | (bytes[headerStart + 19] << 8) | (bytes[headerStart + 20] << 16) | (bytes[headerStart + 21] << 24);
+          const fnLen = bytes[headerStart + 26] | (bytes[headerStart + 27] << 8);
+          const extraLen = bytes[headerStart + 28] | (bytes[headerStart + 29] << 8);
+          const dataStart = headerStart + 30 + fnLen + extraLen;
+          let end = dataStart + compSize;
+          if (compSize <= 0 || end > bytes.length) {
+            end = bytes.length;
+            for (let i = dataStart + 10; i < bytes.length - 4; i++) {
+              if (bytes[i] === 0x50 && bytes[i+1] === 0x4b) { end = i; break; }
+            }
+          }
+          compressed = bytes.subarray(dataStart, end);
+        }
+      }
+    }
+
+    if (!compressed || compressed.length === 0) return '';
+
+    let xml = '';
+    if (compMethod === 8) {
+      const ds = new DecompressionStream('deflate-raw');
+      const writer = ds.writable.getWriter();
+      writer.write(compressed);
+      writer.close();
+      const chunks = [];
+      const reader = ds.readable.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+      }
+      const totalLen = chunks.reduce((acc, c) => acc + c.length, 0);
+      const out = new Uint8Array(totalLen);
+      let p = 0;
+      for (const c of chunks) { out.set(c, p); p += c.length; }
+      xml = new TextDecoder('utf-8').decode(out);
+    } else if (compMethod === 0) {
+      xml = new TextDecoder('utf-8').decode(compressed);
+    }
+    if (!xml) return '';
+    const paras = xml.split(/<w:p[ >]/);
+    const lines = [];
+    for (const p of paras) {
+      const texts = [];
+      const m = p.matchAll(/<w:t[^>]*>(.*?)<\/w:t>/g);
+      for (const t of m) texts.push(t[1]);
+      const l = texts.join('').trim();
+      if (l) lines.push(l);
+    }
+    const result = lines.join('\n').trim();
+    if (result.length > 15000) return result.slice(0, 15000) + '\n...（文档较长，已截取前 15000 字符）';
+    return result;
+  } catch (e) {
+    return '';
+  }
 }
 
 function hexToBytes(hex) { const o = new Uint8Array(hex.length / 2); for (let i = 0; i < o.length; i++) o[i] = parseInt(hex.substr(i * 2, 2), 16); return o; }
