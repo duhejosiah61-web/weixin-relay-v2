@@ -35,9 +35,8 @@ export function buildWeixinSystem(char, recentBlock = '') {
     '【最重要：一行就是一条消息】',
     '你这次回复可以发好几条。**你每写一行，微信就会单独发出去一条消息**，',
     '对方看到的就是一个个分开的小气泡，跟你平时打字聊天一模一样。',
-    '为了让对方在手机和平板分屏小屏下看得很舒服，每行请保持在 8~18 个字以内的自然短句，严禁写超长单句。',
-    '请务必拆开写：一句话一行、问句单独一行、想补充的再另起一行。',
-    '想回几句就回几句，长短随心决定，写多少都行；但请分行发送，绝对不要把所有话全塞进一个密集的大段落里。',
+    '请按自然说话的节奏分行写：一句话一行、问句单独一行、想补充的再另起一行。',
+    '想回几句就回几句，长短随心决定，写多少都行，务必把你想说的话完整说完；但请分行发送，绝对不要把所有话全塞进一个密集的大段落里。',
     '也不要自己加编号（不要写 1. 2. 3.），不要给每行加引号。微信里只输出纯粹自然的人类口语文本，严禁夹带任何方括号、标记符或多余符号。',
     '如果对方重复问同一个问题、或对同一个话题再次提问，绝对严禁说「刚刚不是解释过了吗」「我之前不是说过了吗」等推脱或不耐烦的话！请完全当作对方想听不同角度的新回答、或需要你换个语气重新作答，给出全新且真挚的回应。',
     '如果用户发来的是图片，你会直接看到图片内容，正常针对画面说话就行，不用问「你发了什么」。',
@@ -112,10 +111,10 @@ const INLINE_MARKS = [
 const NOTE_DIRECTIVE_REGEX = /\[(?:小纸条|提醒|待办|备忘)\s*[:：]\s*(?:([^|｜\n\]]+)\s*[|｜]\s*)?([^\]]+)\]/i;
 const ALL_NOTE_DIRECTIVES_REGEX = /\[(?:小纸条|提醒|待办|备忘)\s*[:：][^\]]*\]/gi;
 
-/** 单条消息的软长度上限：适配平板分屏/小窗，超过 18 字自动沿标点拆成小气泡，杜绝微信右侧切字 */
-const MAX_LINE_CHARS = 18;
-/** 一次回复最多发几条气泡（放开限制至 50 条，避免长篇回复被截断） */
-const MAX_REPLY_SEGMENTS = 50;
+/** 单条消息的软长度上限：仅当单行超过 120 字时才按句末标点自然切分，绝不把正常句子从逗号处拦腰截断 */
+const MAX_LINE_CHARS = 120;
+/** 一次回复最多发几条气泡（放开限制至 100 条，避免长篇回复被截断） */
+const MAX_REPLY_SEGMENTS = 100;
 
 function collectLineMatches(raw, sourceRe, kind) {
   const s = String(raw || '');
@@ -312,35 +311,22 @@ function pushTextSegments(segs, chunk) {
 
 function splitLongLine(line) {
   if (line.length <= MAX_LINE_CHARS) return [line];
-  const out = [];
-  let rest = line;
-  const breakChars = ['，', '。', '！', '？', '；', '、', ',', '!', '?', ';', ' '];
-  while (rest.length > MAX_LINE_CHARS) {
-    let cut = -1;
-    // 优先在 8 到 MAX_LINE_CHARS 字之间寻找标点符号断句
-    for (let i = Math.min(MAX_LINE_CHARS, rest.length - 1); i >= 8; i--) {
-      if (breakChars.includes(rest[i])) { cut = i + 1; break; }
+  const byPunct = [];
+  let buf = '';
+  for (const ch of line) {
+    buf += ch;
+    if (/[。！？!?…；;]/.test(ch) && buf.length >= MAX_LINE_CHARS * 0.5) {
+      byPunct.push(buf.trim());
+      buf = '';
     }
-    // 如果没有找到标点符号，检查是否正好在括号/颜文字附近
-    if (cut <= 0) {
-      // 检查是否有左括号或表情符号，如果在合理位置，优先在括号前切断，避免撕裂颜文字
-      const bracketIdx = rest.slice(0, MAX_LINE_CHARS).search(/[\[\(\（]/);
-      if (bracketIdx >= 8) {
-        cut = bracketIdx;
-      } else {
-        cut = MAX_LINE_CHARS;
-      }
-    }
-    const piece = rest.slice(0, cut).trim();
-    if (piece) out.push(piece);
-    rest = rest.slice(cut).trim();
   }
-  if (rest) {
-    // 如果剩余的尾巴非常短（例如 <= 4 个字符且主要是标点/符号/颜文字尾巴），避免单独发一个孤立小气泡，合并到上一句
-    if (out.length > 0 && rest.length <= 4 && !/[\u4e00-\u9fa5]{2,}/.test(rest)) {
-      out[out.length - 1] = `${out[out.length - 1]}${rest}`;
-    } else {
-      out.push(rest);
+  if (buf.trim()) byPunct.push(buf.trim());
+
+  const out = [];
+  for (const piece of byPunct) {
+    if (piece.length <= MAX_LINE_CHARS * 1.5) { out.push(piece); continue; }
+    for (let i = 0; i < piece.length; i += MAX_LINE_CHARS) {
+      out.push(piece.slice(i, i + MAX_LINE_CHARS));
     }
   }
   return out.length ? out : [line];

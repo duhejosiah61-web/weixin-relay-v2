@@ -41,8 +41,8 @@ function sleep(ms) {
  */
 function replyDelay(prevText) {
   const chars = String(prevText || '').length;
-  const jitter = 0.75 + Math.random() * 0.6;
-  return Math.min(2600, Math.max(600, Math.round(chars * 55 * jitter)));
+  const jitter = 0.8 + Math.random() * 0.4;
+  return Math.min(900, Math.max(300, Math.round(chars * 22 * jitter)));
 }
 
 export class WeixinBot {
@@ -328,7 +328,7 @@ export class WeixinBot {
     let raw;
     try {
       raw = await callAI(st.aiProfile, messages, {
-        temperature: 0.85, max_tokens: 1200, maxRetries: 2,
+        temperature: 0.85, max_tokens: 4096, maxRetries: 2,
       });
     } catch (e) {
       // 带图失败就剥图重试一次（有些模型不支持看图）
@@ -339,7 +339,7 @@ export class WeixinBot {
             ...history,
             { role: 'user', content: userText },
           ];
-          raw = await callAI(st.aiProfile, textOnly, { temperature: 0.85, max_tokens: 1200, maxRetries: 2 });
+          raw = await callAI(st.aiProfile, textOnly, { temperature: 0.85, max_tokens: 4096, maxRetries: 2 });
         } catch (e2) {
           return await this.fail(st, `AI 生成失败：${e2?.message || e2}`);
         }
@@ -390,18 +390,26 @@ export class WeixinBot {
       const cleanVal = segments[i].value.replace(/[\[【][\s:：\-_~^]*[\]】]/g, '').trim();
       if (!cleanVal) continue;
       if (sentTexts.length > 0) await sleep(replyDelay(sentTexts[sentTexts.length - 1]));
-      try {
-        await sendTextMessage({
-          botToken: st.botToken,
-          toUserId: lastMsg.fromUserId,
-          contextToken: lastMsg.contextToken,
-          text: cleanVal,
-        });
-        sentTexts.push(cleanVal);
-      } catch (e) {
-        // 一条失败不影响后面的：少一个气泡总比整段回复全丢强
-        console.warn('[weixinBot] 第 ' + (i + 1) + ' 条发送失败：', e?.message || e);
+      let ok = false;
+      for (let retry = 0; retry < 2; retry++) {
+        try {
+          await sendTextMessage({
+            botToken: st.botToken,
+            toUserId: lastMsg.fromUserId,
+            contextToken: lastMsg.contextToken,
+            text: cleanVal,
+          });
+          ok = true;
+          break;
+        } catch (e) {
+          if (retry === 0) {
+            await sleep(350);
+          } else {
+            console.warn('[weixinBot] 第 ' + (i + 1) + ' 条发送失败：', e?.message || e);
+          }
+        }
       }
+      if (ok) sentTexts.push(cleanVal);
     }
     if (!sentTexts.length) return await this.fail(st, `发送失败：${segments[0].value.slice(0, 20)}…`);
     const reply = sentTexts.join('\n');
