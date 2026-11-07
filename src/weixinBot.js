@@ -8,7 +8,7 @@
 //    前端打开时会把本地聊天记录同步上来覆盖（以本地为准，见 index.js 的 /sync）。
 
 import {
-  getUpdates, sendTextMessage, sendTyping, fetchImageDataUrl,
+  getUpdates, sendTextMessage, sendTyping, fetchImageDataUrl, fetchFileDetails,
 } from './ilink.js';
 import {
   buildWeixinSystem, buildUserContent, joinIncoming, parseReplySegments,
@@ -226,14 +226,28 @@ export class WeixinBot {
     const parts = [];
     const images = [];
     for (const m of msgs) {
-      // 语音的转写文字已经被 normalizeIncoming 并进 text；这里兜的是「发了语音但没转写」
-      const t = m.text || (m.hasImage ? '[对方发来一张图片]' : '')
-        || (m.hasVoice ? '[对方发来一条语音]' : '')
-        || (m.otherType ? '[对方发来一条暂不支持的消息]' : '');
-      if (t) parts.push(t);
-      if (m.hasImage) {
+      if (m.text) parts.push(m.text);
+      if (m.hasImage && m.imageItem) {
         const got = await fetchImageDataUrl(m.imageItem);
         if (got?.dataUrl) images.push(got);
+        parts.push('[对方发来一张图片]');
+      }
+      if (m.hasFile && m.fileItem) {
+        const fileDetail = await fetchFileDetails(m.fileItem);
+        if (fileDetail?.isImage && fileDetail.dataUrl) {
+          images.push({ dataUrl: fileDetail.dataUrl, mime: fileDetail.mime });
+          parts.push(`[对方发来图片文件「${fileDetail.fileName}」(${fileDetail.sizeStr})]`);
+        } else if (fileDetail?.textContent) {
+          parts.push(`[对方发来文件「${fileDetail.fileName}」(${fileDetail.sizeStr})，文件正文内容如下：\n${fileDetail.textContent}]`);
+        } else {
+          parts.push(`[对方发来文件「${fileDetail.fileName}」(${fileDetail.sizeStr})]`);
+        }
+      }
+      if (m.hasVoice && !m.text) {
+        parts.push('[对方发来一条语音]');
+      }
+      if (!m.text && !m.hasImage && !m.hasFile && !m.hasVoice && m.otherType) {
+        parts.push('[对方发来一条暂不支持的消息]');
       }
     }
     if (!parts.length && !images.length) return { ok: false, error: '空消息' };

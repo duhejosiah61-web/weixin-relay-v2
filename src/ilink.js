@@ -94,13 +94,14 @@ function normalizeIncoming(msg) {
   const items = Array.isArray(msg.item_list) ? msg.item_list : [];
   let text = '';
   let imageItem = null;
+  let fileItem = null;
   let otherType = 0;
   let hasVoice = false;
   let voiceDuration = 0;
   for (const it of items) {
     if (!it) continue;
     if (it.type === 1 && it.text_item?.text) text += it.text_item.text;
-    // type 2 = 图片（含表情/贴图）；type 3 = 语音，口径同前端 weixinIlink
+    // type 2 = 图片（含表情/贴图）；type 3 = 语音；type 4 = 文件
     else if (it.type === 2) imageItem = it.image_item || null;
     else if (it.type === 3) {
       hasVoice = true;
@@ -108,6 +109,9 @@ function normalizeIncoming(msg) {
       voiceDuration = Number(vt.playtime || 0) || 0;
       const vtText = String(vt.text || '').trim();
       if (vtText) text += (text ? ' ' : '') + vtText;
+    }
+    else if (it.type === 4) {
+      fileItem = it.file_item || null;
     }
     else if (it.type && it.type !== 1) otherType = it.type;
   }
@@ -119,6 +123,8 @@ function normalizeIncoming(msg) {
     text: text.trim(),
     hasImage: !!imageItem,
     imageItem,
+    hasFile: !!fileItem,
+    fileItem,
     hasVoice,
     voiceDuration,
     otherType,
@@ -203,6 +209,126 @@ export async function fetchImageDataUrl(imageItem) {
     console.warn('[ilink] 图片下载/解密失败', e?.message || e);
     return null;
   }
+}
+
+// ── 收文件解密与文本/图像内容提取 ──
+
+export async function fetchFileDetails(fileItem) {
+  const fileName = String(fileItem?.file_name || '未命名文件').trim();
+  const fileLen = Number(fileItem?.len || 0);
+  const sizeStr = formatFileSize(fileLen);
+
+  try {
+    const media = fileItem?.media || {};
+    const param = String(media.encrypt_query_param || '').trim();
+    const keyB64 = String(media.aes_key || '').trim();
+    if (!param || !keyB64) {
+      return { ok: true, fileName, sizeStr, textContent: '', isImage: false, dataUrl: '' };
+    }
+
+    const aesKey = decodeAesKey(keyB64);
+    if (!aesKey || aesKey.length !== 16) {
+      return { ok: true, fileName, sizeStr, textContent: '', isImage: false, dataUrl: '' };
+    }
+
+    const url = `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=${encodeURIComponent(param)}`;
+    const res = await fetch(url, { method: 'GET' });
+    if (res.status < 200 || res.status >= 300) {
+      return { ok: true, fileName, sizeStr, textContent: '', isImage: false, dataUrl: '' };
+    }
+
+    const buf = await res.arrayBuffer();
+    const cipher = new Uint8Array(buf);
+    if (!cipher.length) {
+      return { ok: true, fileName, sizeStr, textContent: '', isImage: false, dataUrl: '' };
+    }
+
+    const plain = aes128EcbDecryptJS(cipher, aesKey);
+    if (!plain.length) {
+      return { ok: true, fileName, sizeStr, textContent: '', isImage: false, dataUrl: '' };
+    }
+
+    const unpadded = stripPadding(plain);
+
+    // 1. 检查是否是以文件形式发送的图片
+    const imageMime = sniffImageMime(unpadded);
+    if (imageMime || /\.(jpe?g|png|gif|webp|bmp)$/i.test(fileName)) {
+      const mime = imageMime || 'image/jpeg';
+      let bin = '';
+      for (let i = 0; i < unpadded.length; i += 0x8000) {
+        bin += String.fromCharCode.apply(null, unpadded.subarray(i, i + 0x8000));
+      }
+      return {
+        ok: true,
+        fileName,
+        sizeStr,
+        isImage: true,
+        dataUrl: `data:${mime};base64,${btoa(bin)}`,
+        mime,
+        textContent: ''
+      };
+    }
+
+    // 2. 检查常见文本文件（txt, md, json, csv, code 等）
+    let textContent = '';
+    const ext = fileName.toLowerCase().split('.').pop() || '';
+    const textExts = ['txt', 'md', 'markdown', 'json', 'csv', 'tsv', 'log', 'js', 'ts', 'jsx', 'tsx', 'py', 'java', 'c', 'cpp', 'h', 'html', 'css', 'vue', 'xml', 'yaml', 'yml', 'sh', 'bat', 'sql', 'ini', 'conf', 'env'];
+    let isLikelyText = textExts.includes(ext);
+    if (!isLikelyText && unpadded.length > 0) {
+      let nullCount = 0;
+      const checkLen = Math.min(unpadded.length, 500);
+      for (let i = 0; i < checkLen; i++) {
+        if (unpadded[i] === 0) nullCount++;
+      }
+      if (nullCount === 0) isLikelyText = true;
+    }
+
+    if (isLikelyText) {
+      try {
+        const decoded = new TextDecoder('utf-8', { fatal: false }).decode(unpadded);
+        if (decoded && decoded.trim()) {
+          textContent = decoded.slice(0, 15000).trim();
+          if (decoded.length > 15000) {
+            textContent += '\n...（篇幅过长，已截取前 15000 字符）';
+          }
+        }
+      } catch (e) { /* ignore */ }
+    } else if (ext === 'pdf') {
+      textContent = extractSimplePdfText(unpadded);
+    }
+
+    return {
+      ok: true,
+      fileName,
+      sizeStr,
+      isImage: false,
+      dataUrl: '',
+      textContent
+    };
+  } catch (e) {
+    console.warn('[ilink] 文件下载/解析失败', e?.message || e);
+    return { ok: true, fileName, sizeStr, textContent: '', isImage: false, dataUrl: '' };
+  }
+}
+
+function formatFileSize(bytes) {
+  if (!bytes || isNaN(bytes)) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function extractSimplePdfText(unpadded) {
+  try {
+    const raw = new TextDecoder('latin1').decode(unpadded);
+    const matches = raw.match(/\(([^()]{2,100})\)\s*Tj/g);
+    if (matches && matches.length > 0) {
+      const texts = matches.map(m => m.replace(/^\(/, '').replace(/\)\s*Tj$/, '').trim()).filter(Boolean);
+      const joined = texts.join(' ');
+      if (joined.length >= 20) return joined.slice(0, 8000);
+    }
+  } catch (_) {}
+  return '';
 }
 
 function hexToBytes(hex) { const o = new Uint8Array(hex.length / 2); for (let i = 0; i < o.length; i++) o[i] = parseInt(hex.substr(i * 2, 2), 16); return o; }
