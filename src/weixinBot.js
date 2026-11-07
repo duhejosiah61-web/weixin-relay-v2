@@ -253,14 +253,56 @@ export class WeixinBot {
     if (!parts.length && !images.length) return { ok: false, error: '空消息' };
 
     const lastMsg = msgs[msgs.length - 1];
-    const userText = joinIncoming(parts.length ? parts : (images.length ? ['[对方发来一张图片]'] : []));
-    const userContent = buildUserContent(userText, images);
+    let userText = joinIncoming(parts.length ? parts : (images.length ? ['[对方发来一张图片]'] : []));
+    let userContent = buildUserContent(userText, images);
 
     // 记下回复凭据（供后面潜在的自发消息用）
     let st = await this.load();
     st.lastContext = { toUserId: lastMsg.fromUserId, contextToken: lastMsg.contextToken, at: Date.now() };
     st.cursor = s.cursor;
     await this.save(st);
+
+    // ── 撤回与重说指令识别 ──
+    const trimmedUser = userText.trim();
+    const isRecallCmd = /^(撤回|撤销|撤回上一句|删掉刚才那句|忘掉刚才那句|删掉上一句|忘掉上一句|刚才那句不算|上一句不算)$/i.test(trimmedUser)
+      || /撤回了一条消息/.test(trimmedUser);
+    const isRegenCmd = /^(重说|重新说|重回|重新回答|重新回|重来|重写)$/i.test(trimmedUser);
+
+    if (isRecallCmd) {
+      st = await this.load();
+      if (Array.isArray(st.history) && st.history.length >= 2) {
+        st.history = st.history.slice(0, -2);
+      } else {
+        st.history = [];
+      }
+      await this.save(st);
+      if (!/撤回了一条消息/.test(trimmedUser)) {
+        await sendTextMessage({
+          botToken: st.botToken,
+          toUserId: lastMsg.fromUserId,
+          contextToken: lastMsg.contextToken,
+          text: '好，刚才那段我翻篇忘掉了，你重新跟我说吧'
+        });
+      }
+      return { ok: true, recalled: true };
+    }
+
+    if (isRegenCmd) {
+      st = await this.load();
+      let prevUserText = '';
+      if (Array.isArray(st.history) && st.history.length >= 2) {
+        const lastUser = st.history[st.history.length - 2];
+        if (lastUser && lastUser.role === 'user') {
+          prevUserText = lastUser.content;
+        }
+        st.history = st.history.slice(0, -2);
+        await this.save(st);
+      }
+      if (prevUserText) {
+        userText = prevUserText;
+        userContent = prevUserText;
+      }
+    }
 
     const system = buildWeixinSystem(st.char, st.recentBlock);
     // 按上下文预算安全构建 history，尽可能保留全部历史，同时避免超出模型上下文上限报错
