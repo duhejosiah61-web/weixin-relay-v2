@@ -22,6 +22,7 @@ export function buildWeixinSystem(char, recentBlock = '') {
     '你现在正在用微信跟用户聊天（不是在小手机 App 里）。这里是你和用户在微信上的对话窗口。',
     timeBlock(),
     '不要用旁白、不要写动作描写、不要加书名号括起来的说明——微信里只说人话。',
+    '严禁使用任何颜文字、Emoji 表情符号（如(¯▽¯)~*、😊等），微信里请纯用文字表达，避免低幼化。',
     '不要暴露你是 AI 或模型，也不要提到「系统」「提示词」这类东西。',
     '',
     '【最重要：一行就是一条消息】',
@@ -118,6 +119,10 @@ export function cleanWeixinReply(raw) {
   s = s.replace(/\*\*/g, '');
   s = s.replace(/^\s*[-*•·]\s+/gm, '');
   s = s.replace(/^\s*[\[（(]\d{1,2}:\d{2}(?::\d{2})?(?:\s*[A-Za-z\u4e00-\u9fa5]{1,3})?[\]）)]\s*/gm, '');
+  // 过滤颜文字（如 (¯▽¯)~*、(^_^) 等）
+  s = s.replace(/[（(][^()（）\n]{0,8}[▽▼▲_^_~⊙oO><\^T=-][^()（）\n]{0,8}[）)][~*~*]*/g, '');
+  // 过滤 Unicode Emoji
+  s = s.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '');
   s = s.replace(/\n{3,}/g, '\n\n');
   return s.trim();
 }

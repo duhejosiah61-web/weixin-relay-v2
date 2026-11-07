@@ -19,7 +19,7 @@ import { sendWebPush } from './push.js';
 
 const POLL_MS = 5000;        // 轮询间隔（alarm 自调度）
 const COLLECT_MS = 1500;     // 连发合并窗口：收到消息后再等一小会儿
-const HISTORY_MAX = 20;      // 保留最近多少条上下文
+const HISTORY_MAX = 50;      // 保留最近多少条上下文（扩容以保证深度连续剧情记忆）
 const SEEN_TTL_MS = 10 * 60 * 1000;
 const SEEN_MAX = 300;
 
