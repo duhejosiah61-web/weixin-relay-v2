@@ -45,6 +45,54 @@ function replyDelay(prevText) {
   return Math.min(900, Math.max(300, Math.round(chars * 22 * jitter)));
 }
 
+async function generateCharacterReminderMessages({ aiProfile, char, recentBlock, history, reminderText }) {
+  const charName = char?.name || 'TA';
+  if (!aiProfile || !char) {
+    return [`刚看了一眼时间，想起提醒你一声：${reminderText}`];
+  }
+
+  try {
+    const system = buildWeixinSystem(char, recentBlock);
+    const prompt = `【你主动发起的日常约定/备忘提醒】：
+你之前随手记下了一件提醒/约定事项：「${reminderText}」。
+现在预定的时间已经到了。请你完全代入你（${charName}）的真实性格、语言习惯与当下的相处状态，主动在微信上给她发 1~2 句自然的日常消息，把这件事自然交代/叮嘱她。
+
+严正要求：
+- 像真人在微信上跟喜欢的人随口说话一样自然亲切（例如若是约好去吃饭就自然说“在XX门口了，收拾好没/慢慢走不着急”，若是提醒吃药/带东西就关切叮嘱）。
+- 绝对不要带任何名字前缀（严禁出现“${charName}：”或“【提醒】”）。
+- 绝对不要像系统机器人报时，绝对严禁出现“系统提醒/之前小纸条上记下的/到时间啦提醒你一下哦”等机械出戏的字眼！
+- 分 1~2 行短句输出，每行表达一个念头，像平时发微信一样。`;
+
+    const recentHistory = (history || []).slice(-6).map((m) => ({
+      role: m.role,
+      content: typeof m.content === 'string' ? m.content.replace(/[\[【][\s:：\-_~^]*[\]】]/g, '').trim() : m.content,
+    }));
+
+    const messages = [
+      { role: 'system', content: system },
+      ...recentHistory,
+      { role: 'user', content: prompt },
+    ];
+
+    const aiRes = await callAI(aiProfile, messages, {
+      temperature: 0.85,
+      max_tokens: 600,
+      maxRetries: 1,
+    });
+
+    const rawReply = typeof aiRes === 'string' ? aiRes : (aiRes?.content || '');
+    const cleaned = cleanWeixinReply(rawReply);
+    const segs = parseReplySegments(cleaned).filter((x) => x.kind === 'text' && x.text);
+    if (segs.length > 0) {
+      return segs.map((x) => x.text);
+    }
+  } catch (e) {
+    console.warn('[weixinBot] 生成角色口吻提醒失败，退回自然兜底', e);
+  }
+
+  return [`刚看了一眼时间，想起提醒你一声：${reminderText}`];
+}
+
 export class WeixinBot {
   constructor(ctx, env) {
     this.ctx = ctx;
@@ -107,20 +155,42 @@ export class WeixinBot {
     const now = Date.now();
     if (s.reminders && s.reminders.length) {
       let changed = false;
+      const firedTexts = new Set();
       for (const rem of s.reminders) {
         if (!rem.notified && rem.targetTime && rem.targetTime <= now) {
           rem.notified = true;
+          rem.notifiedAt = now;
           changed = true;
+
+          const normText = String(rem.text || '').trim();
+          if (firedTexts.has(normText)) continue;
+          firedTexts.add(normText);
+
           try {
-            if (s.botToken && rem.toUserId) {
-              const remindMsg = `${rem.charName || 'TA'}：之前小纸条上记下的【${rem.text}】到时间啦，提醒你一下哦。`;
-              await sendTextMessage({
-                botToken: s.botToken,
-                toUserId: rem.toUserId,
-                contextToken: rem.contextToken,
-                text: remindMsg,
+            const botToken = s.botToken;
+            const toUserId = rem.toUserId || s.lastUserId;
+            const contextToken = s.lastContextToken || rem.contextToken;
+            if (botToken && toUserId) {
+              const remindMsgs = await generateCharacterReminderMessages({
+                aiProfile: s.aiProfile,
+                char: s.char,
+                recentBlock: s.recentBlock,
+                history: s.history,
+                reminderText: rem.text,
               });
-              s.runtime = { ...(s.runtime || {}), replied: (s.runtime?.replied || 0) + 1 };
+
+              for (const msgText of remindMsgs) {
+                await sendTextMessage({
+                  botToken,
+                  toUserId,
+                  contextToken,
+                  text: msgText,
+                });
+                s.history = s.history || [];
+                s.history.push({ role: 'assistant', content: msgText });
+                await new Promise((r) => setTimeout(r, 450));
+              }
+              s.runtime = { ...(s.runtime || {}), replied: (s.runtime?.replied || 0) + remindMsgs.length };
             }
           } catch (e) {
             console.warn('[weixinBot] 提醒消息发送失败', e);
@@ -134,6 +204,7 @@ export class WeixinBot {
         }
       }
       if (changed) {
+        s.reminders = s.reminders.filter((r) => !r.notified || (now - (r.notifiedAt || r.targetTime || 0) < 86400000));
         await this.save(s);
       }
     }
@@ -259,6 +330,8 @@ export class WeixinBot {
     // 记下回复凭据（供后面潜在的自发消息用）
     let st = await this.load();
     st.lastContext = { toUserId: lastMsg.fromUserId, contextToken: lastMsg.contextToken, at: Date.now() };
+    st.lastUserId = lastMsg.fromUserId;
+    st.lastContextToken = lastMsg.contextToken;
     st.cursor = s.cursor;
     await this.save(st);
 
@@ -357,28 +430,35 @@ export class WeixinBot {
       st.reminders = st.reminders || [];
       st.charNotes = st.charNotes || [];
 
-      const newRem = {
-        id: `remind-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        targetTime: resolved.timestamp,
-        timeStr: resolved.formattedTime,
-        text: noteMatch.text,
-        charName: st.char?.name || '伴侣',
-        toUserId: lastMsg.fromUserId,
-        contextToken: lastMsg.contextToken,
-        createdAt: Date.now(),
-        notified: false
-      };
-      st.reminders.push(newRem);
-      st.charNotes.push({
-        id: Date.now() + Math.random(),
-        text: noteMatch.text,
-        timeStr: resolved.formattedTime,
-        fromCharName: st.char?.name || '伴侣',
-        createdAt: Date.now(),
-        synced: false
-      });
-      await this.save(st);
-      await this.broadcast({ type: 'note-added', note: newRem });
+      // 严格去重：相同内容与相近设定时间（2分钟内）不重复存入，彻底避免一件事被连续添加多条
+      const isDup = st.reminders.some(
+        (r) => r.text === noteMatch.text && Math.abs((r.targetTime || 0) - (resolved.timestamp || 0)) < 120000
+      );
+
+      if (!isDup) {
+        const newRem = {
+          id: `remind-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          targetTime: resolved.timestamp,
+          timeStr: resolved.formattedTime,
+          text: noteMatch.text,
+          charName: st.char?.name || '伴侣',
+          toUserId: lastMsg.fromUserId,
+          contextToken: lastMsg.contextToken,
+          createdAt: Date.now(),
+          notified: false
+        };
+        st.reminders.push(newRem);
+        st.charNotes.push({
+          id: Date.now() + Math.random(),
+          text: noteMatch.text,
+          timeStr: resolved.formattedTime,
+          fromCharName: st.char?.name || '伴侣',
+          createdAt: Date.now(),
+          synced: false
+        });
+        await this.save(st);
+        await this.broadcast({ type: 'note-added', note: newRem });
+      }
     }
 
     const segments = parseReplySegments(raw).filter((s) => s.kind === 'text');
